@@ -1,0 +1,27 @@
+# Configuração não sensível do microsserviço. Segredos NÃO vão aqui — ver secret.yaml.
+# As chaves seguem o mapeamento do .NET: "__" separa seções (Messaging__Habilitado =
+# Messaging:Habilitado no appsettings).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orcamento-config
+  namespace: orcamento
+  labels:
+    app.kubernetes.io/part-of: orcamento-pagamento
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+
+  # Mesmos emissores e audiência do monólito: o microsserviço só valida os tokens
+  # emitidos pela API (e-mail/senha) e pela Lambda de autenticação por CPF.
+  JwtSettings__Issuer: "MechanicLtda.API"
+  JwtSettings__IssuerCpf: "MechanicLtda.Auth.Cpf"
+  JwtSettings__Audience: "MechanicLtda.Clients"
+
+  # Mensageria (SNS/SQS). Desligada na base; cada overlay liga e aponta para o seu
+  # ambiente (LocalStack no local, AWS na produção).
+  Messaging__Habilitado: "false"
+  Messaging__Regiao: "us-east-1"
+
+  # Pagamento. "false" usa o gateway fake, que não toca no Mercado Pago. Ligar exige o
+  # access token no Secret (MERCADOPAGO_ACCESS_TOKEN).
+  Pagamentos__Habilitado: "false"

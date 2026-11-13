@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: orcamento-localstack
+  namespace: orcamento
+  labels:
+    app.kubernetes.io/part-of: orcamento-pagamento
+    app.kubernetes.io/name: orcamento-localstack
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: orcamento-localstack
+  ports:
+    - name: edge
+      port: 4566
+      targetPort: 4566

@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orcamento-api
+  namespace: orcamento
+  labels:
+    app.kubernetes.io/part-of: orcamento-pagamento
+    app.kubernetes.io/name: orcamento-api
+spec:
+  # O HPA (api-hpa.yaml) controla o número de réplicas; este valor só vale até o HPA
+  # calcular a primeira recomendação.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: orcamento-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: orcamento-api
+    spec:
+      containers:
+        - name: api
+          # Imagem construída a partir do Dockerfile do OrcamentoPagamento-service.
+          # O overlay prod troca pelo repositório do ECR.
+          image: orcamento-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: orcamento-config
+          env:
+            - name: ConnectionStrings__DefaultConnection
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: ConnectionStrings__DefaultConnection
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: JWT_SECRET_KEY
+            - name: Pagamentos__MercadoPago__AccessToken
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: MERCADOPAGO_ACCESS_TOKEN
+                  optional: true
+            - name: Pagamentos__MercadoPago__WebhookSecret
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: MERCADOPAGO_WEBHOOK_SECRET
+                  optional: true
+            - name: Pagamentos__MercadoPago__NotificationUrl
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: MERCADOPAGO_NOTIFICATION_URL
+                  optional: true
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "192Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          # A API aplica as migrations na subida. O startupProbe dá até 200s para isso
+          # sem que liveness/readiness reiniciem o container no meio do boot.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 15
+            failureThreshold: 6

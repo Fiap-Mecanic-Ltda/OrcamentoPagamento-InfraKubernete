@@ -1,0 +1,56 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orcamento
+
+# Produção: o mesmo k3s na EC2 do InfraKubernete do monólito. Sem pod de banco (RDS do
+# OrcamentoPagamento-InfraSGBD) nem LocalStack (SNS/SQS reais).
+#
+# ⚠️ Ainda não aplicável: depende do Terraform (ECR, SNS/SQS, RDS, SSM, porta no
+# security group), que fica para a próxima etapa. Ver README.md.
+resources:
+  - ../../base
+
+# A pipeline troca a tag pelo SHA da imagem publicada (`kustomize edit set image`).
+images:
+  - name: orcamento-api
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mechanicltda-orcamento
+    newTag: latest
+
+patches:
+  # NodePort fixo. O k3s do monólito aceita 8000-9000; 8080 e 8090 já são da API e do
+  # Web do monólito. A 8081 precisa ser liberada no security group da EC2.
+  - target:
+      kind: Service
+      name: orcamento-api
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 8081
+
+  # ECR exige autenticação para pull. O Secret docker-registry "ecr-creds" é mantido
+  # pelo timer do user_data da EC2 — precisa existir também neste namespace.
+  - target:
+      kind: Deployment
+      name: orcamento-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: ecr-creds
+
+  # Remove o Secret placeholder da base: o real vem do SSM Parameter Store, recriado
+  # pela pipeline a cada deploy.
+  - target:
+      kind: Secret
+      name: orcamento-secrets
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: orcamento-secrets
+        namespace: orcamento
