@@ -1,0 +1,130 @@
+name: Terraform - Infra do Orcamento no cluster
+
+# Provisiona o que o microsservico precisa dentro do cluster compartilhado:
+# ECR, SNS/SQS (com DLQ), regra no ALB interno, policies nas roles dos nos e do
+# GitHub Actions e os parametros no SSM. Le o state do InfraKubernete do
+# monolito via terraform_remote_state - aquele stack precisa estar aplicado antes.
+#
+# - homolog: plan a cada mudanca em infra/.
+# - main: plan e apply, com aprovacao do Environment "production".
+on:
+  push:
+    branches: [main, homolog]
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  pull_request:
+    branches: [main, homolog]
+    paths:
+      - "infra/**"
+      - ".github/workflows/terraform.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "O que rodar (apply exige aprovacao do Environment production)"
+        type: choice
+        default: plan
+        options: [plan, apply]
+
+permissions:
+  contents: read
+
+jobs:
+  read-tf-vars:
+    name: Le variaveis padrao do Terraform
+    runs-on: ubuntu-latest
+    outputs:
+      aws_region: ${{ steps.vars.outputs.aws_region }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Extrai defaults do variables.tf
+        id: vars
+        run: |
+          value=$(awk '/variable "aws_region"/,/^}/' infra/variables.tf | grep default | sed -E 's/.*default[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
+          if [ -z "$value" ]; then
+            echo "::error::Nao encontrei o default de aws_region em infra/variables.tf"
+            exit 1
+          fi
+          echo "aws_region=$value" >> "$GITHUB_OUTPUT"
+
+  # Chave estatica do terraform-deployer: e a identidade que le o state remoto
+  # do monolito e anexa policies nas roles criadas por ele.
+  plan:
+    name: Terraform plan
+    needs: read-tf-vars
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      TF_VAR_mercadopago_access_token: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}
+      TF_VAR_mercadopago_webhook_secret: ${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}
+      TF_VAR_mercadopago_notification_url: ${{ vars.MERCADOPAGO_NOTIFICATION_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Configura credenciais AWS (chave estatica do terraform-deployer)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.read-tf-vars.outputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Terraform fmt (check)
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        run: terraform plan -input=false
+
+  apply:
+    name: Terraform apply
+    needs: [read-tf-vars, plan]
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply'))
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: terraform-apply-orcamento-prod
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: infra
+    env:
+      TF_VAR_mercadopago_access_token: ${{ secrets.MERCADOPAGO_ACCESS_TOKEN }}
+      TF_VAR_mercadopago_webhook_secret: ${{ secrets.MERCADOPAGO_WEBHOOK_SECRET }}
+      TF_VAR_mercadopago_notification_url: ${{ vars.MERCADOPAGO_NOTIFICATION_URL }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Configura credenciais AWS (chave estatica do terraform-deployer)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ needs.read-tf-vars.outputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: "~> 1.10"
+
+      - name: Terraform init
+        run: terraform init -input=false
+
+      - name: Terraform apply
+        run: terraform apply -input=false -auto-approve
+
+      - name: Outputs
+        run: terraform output

@@ -1,28 +1,44 @@
 # OrcamentoPagamento-InfraKubernete
 
-Manifestos Kubernetes do microsserviço
+Terraform e manifestos Kubernetes do microsserviço
 [OrcamentoPagamento-service](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-service),
-organizados como base + overlays (Kustomize), no mesmo padrão do
-[InfraKubernete](https://github.com/Fiap-Mecanic-Ltda/InfraKubernete) do monólito.
+no mesmo padrão do [InfraKubernete](https://github.com/Fiap-Mecanic-Ltda/InfraKubernete) do
+monólito: `terraform plan/apply` e deploy no cluster.
 
-- **`overlays/local`**: desenvolvimento num cluster local, com SQL Server e LocalStack
+O serviço **não tem cluster próprio**: roda no k3s do monólito, no namespace `orcamento`.
+Este repositório só acrescenta ao cluster o que é do orçamento.
+
+- **`infra/`**: Terraform do ECR, SNS/SQS com DLQ, regra no ALB interno, policies nas roles
+  dos nós e do GitHub Actions e parâmetros no SSM.
+- **`k8s/overlays/local`**: desenvolvimento num cluster local, com SQL Server e LocalStack
   (SNS/SQS) como pods.
-- **`overlays/prod`**: o k3s da EC2 do monólito, com o banco no RDS do
+- **`k8s/overlays/prod`**: o k3s da EC2 do monólito, com o banco no RDS do
   [OrcamentoPagamento-InfraSGBD](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-InfraSGBD)
-  e SNS/SQS reais. **Ainda não aplicável**: depende do Terraform, que é a próxima etapa.
+  e SNS/SQS reais.
 
 ## Estrutura
 
 ```
 .
+├── .github/workflows/
+│   ├── terraform.yml               # plan (homolog/PR) e apply (main, Environment production)
+│   └── deploy.yml                  # kustomize + SSM Run Command no server k3s
+├── infra/                          # Terraform (state em s3://.../prod/orcamento/terraform.tfstate)
+│   ├── data.tf                     # remote state do InfraKubernete do monólito + roles existentes
+│   ├── ecr.tf                      # mechanicltda-orcamento
+│   ├── messaging.tf                # SNS ordem-servico-eventos -> SQS itens-alterados -> DLQ; SNS orcamento-eventos
+│   ├── alb.tf                      # target group 8081 + regra /api/orcamento|pagamento|webhooks no ALB interno
+│   ├── iam.tf                      # SNS/SQS/ECR para os nós; push no ECR para o GitHub Actions
+│   └── ssm.tf                      # ARNs/URL da mensageria e segredos do Mercado Pago
 ├── k8s/
 │   ├── base/                       # Namespace, ConfigMap, Secret (placeholder), API: Deployment/Service/HPA
 │   └── overlays/
 │       ├── local/                  # + sqlserver, + localstack (com script de init), initContainers
-│       └── prod/                   # NodePort 8081, imagem do ECR, imagePullSecrets, sem Secret placeholder
+│       └── prod/                   # NodePort 8081, mensageria ligada, imagePullSecrets, sem Secret placeholder
 ├── scripts/
 │   ├── cluster-local.sh            # k3s dentro de um container Docker (up | down | status)
-│   └── deploy-local.sh             # build da imagem, import no k3s, Secret a partir do .env, apply
+│   ├── deploy-local.sh             # build da imagem, import no k3s, Secret a partir do .env, apply
+│   └── esperar-ssm.sh              # espera um comando do SSM terminar (usado pelo deploy.yml)
 └── .env.example                    # Segredos do cluster local
 ```
 
@@ -112,15 +128,65 @@ orcamento-api:latest`, em vez de usar o `deploy-local.sh`.
   na primeira migration. O `READ_COMMITTED_SNAPSHOT` que o InfraSGBD liga no compose não é
   aplicado aqui.
 
-## Próximos passos (Terraform)
+## Produção (Terraform + deploy)
 
-Para o `overlays/prod` funcionar:
+### Ordem de aplicação
 
-- **ECR** `mechanicltda-orcamento`, que é o nome que o CI do serviço já usa.
-- **SNS/SQS**: tópicos `ordem-servico-eventos` e `orcamento-eventos`, fila
-  `ordem-servico-itens-alterados` com DLQ. As ARNs entram no ConfigMap do overlay prod, e
-  `Messaging__Habilitado` passa a `"true"`.
-- **Security group** da EC2 liberando a **8081**.
-- **IAM** da instância com permissão de publish no SNS e de consumo da SQS.
-- **Pipeline de deploy** (via SSM, como no monólito), criando o Secret a partir do SSM e o
-  `ecr-creds` no namespace `orcamento`.
+Cada stack lê o anterior via `terraform_remote_state`, então a ordem importa:
+
+| # | Repositório | O que faz |
+|---|---|---|
+| 1 | [InfraKubernete](https://github.com/Fiap-Mecanic-Ltda/InfraKubernete) | Cluster, ALB, roles; libera a 8081 no SG dos nós e põe os repos do orçamento no trust do OIDC |
+| 2 | **este** (`terraform.yml`) | ECR, SNS/SQS, regra do ALB, policies, SSM |
+| 3 | [OrcamentoPagamento-InfraSGBD](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-InfraSGBD) | RDS + `db-connection-string` no SSM |
+| 4 | [OrcamentoPagamento-service](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-service) | Push na `main` publica a imagem e dispara o `deploy.yml` daqui |
+
+Rodando o Terraform na mão:
+
+```bash
+cd infra
+cp terraform.tfvars.example terraform.tfvars   # opcional: só para o Mercado Pago real
+terraform init
+terraform plan
+terraform apply
+```
+
+### O que é criado
+
+| Recurso | Nome |
+|---|---|
+| ECR | `mechanicltda-orcamento` |
+| SNS (publicado pelo monólito) | `mechanicltda-prod-ordem-servico-eventos` |
+| SQS + DLQ (consumida pelo serviço) | `mechanicltda-prod-ordem-servico-itens-alterados` (+ `-dlq`, 5 tentativas) |
+| SNS (publicado pelo serviço) | `mechanicltda-prod-orcamento-eventos` |
+| Target group + regra no ALB interno | `/api/orcamento*`, `/api/pagamento*`, `/api/webhooks/mercadopago` → NodePort 8081 |
+| Policies inline | `mechanicltda-prod-ec2-role` e `-worker-role` (SNS/SQS/ECR), `-github-actions` (push no ECR) |
+| SSM `/mechanicltda/prod/orcamento/` | `topico-eventos-arn`, `fila-itens-alterados-url`, `mercadopago-*` (opcionais) |
+| SSM `/mechanicltda/prod/` | `ordem-servico-eventos-arn`, para o monólito publicar |
+
+O deploy monta o Secret `orcamento-secrets` com `db-connection-string` (do InfraSGBD),
+`jwt-secret-key` (o mesmo do monólito) e os parâmetros do Mercado Pago, se existirem. Sem o
+access token no SSM, o serviço sobe com `Pagamentos__Habilitado=false` (gateway fake).
+
+### Secrets do GitHub (este repositório)
+
+| Nome | Tipo | Uso |
+|---|---|---|
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | secret | `terraform.yml` (terraform-deployer) |
+| `AWS_ROLE_ARN` | secret | `deploy.yml` (OIDC). Output `github_actions_role_arn` do InfraKubernete |
+| `MERCADOPAGO_ACCESS_TOKEN` / `MERCADOPAGO_WEBHOOK_SECRET` | secret | opcionais |
+| `MERCADOPAGO_NOTIFICATION_URL` | variable | opcional |
+
+No **OrcamentoPagamento-service**, o `INFRA_DISPATCH_TOKEN` precisa ser um token fine-grained
+com acesso a **este** repositório (Contents: read/write).
+
+### Limitações conhecidas
+
+- **Só o server k3s está no target group.** O kube-proxy encaminha para o pod em qualquer nó,
+  então funciona; mas se a EC2 do server for recriada, rode o apply daqui de novo para
+  registrar o Instance ID novo.
+- **Webhook do Mercado Pago no API Gateway.** O `ANY /api/{proxy+}` do repositório Lambda
+  exige JWT. Para o Mercado Pago chamar o webhook, `POST /api/webhooks/mercadopago` precisa
+  entrar em `rotas_publicas` no `infra/cluster.tf` de lá.
+- **Credenciais AWS no pod vêm do IMDS.** Funciona porque a AMI AL2023 usa hop limit 2. Se
+  isso mudar, o SDK dentro do pod deixa de achar credenciais.
