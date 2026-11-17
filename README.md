@@ -27,14 +27,14 @@ Este repositório só acrescenta ao cluster o que é do orçamento.
 ├── infra/                          # Terraform (state em s3://.../prod/orcamento/terraform.tfstate)
 │   ├── data.tf                     # remote state do InfraKubernete do monólito + roles existentes
 │   ├── ecr.tf                      # mechanicltda-orcamento
-│   ├── alb.tf                      # target group 8081 + regra /api/orcamento|pagamento|webhooks no ALB interno
+│   ├── alb.tf                      # target group 8083 + regra /api/orcamento|pagamento|webhooks no ALB interno
 │   ├── iam.tf                      # pull no ECR para os nós; push no ECR para o GitHub Actions
 │   └── ssm.tf                      # segredos do Mercado Pago
 ├── k8s/
 │   ├── base/                       # Namespace, ConfigMap, Secret (placeholder), API: Deployment/Service/HPA
 │   └── overlays/
 │       ├── local/                  # + sqlserver, + rabbitmq, initContainers
-│       └── prod/                   # NodePort 8081, mensageria ligada, imagePullSecrets, sem Secret placeholder
+│       └── prod/                   # NodePort 8083, mensageria ligada, imagePullSecrets, sem Secret placeholder
 ├── scripts/
 │   ├── cluster-local.sh            # k3s dentro de um container Docker (up | down | status)
 │   ├── deploy-local.sh             # build da imagem, import no k3s, Secret a partir do .env, apply
@@ -139,7 +139,7 @@ Cada stack lê o anterior via `terraform_remote_state`, então a ordem importa:
 
 | # | Repositório | O que faz |
 |---|---|---|
-| 1 | [InfraKubernete](https://github.com/Fiap-Mecanic-Ltda/InfraKubernete) | Cluster, ALB, roles; libera a 8081 no SG dos nós e põe os repos do orçamento no trust do OIDC |
+| 1 | [InfraKubernete](https://github.com/Fiap-Mecanic-Ltda/InfraKubernete) | Cluster, ALB, roles; libera a 8083 no SG dos nós (`microsservicos_node_ports`) e põe os repos do orçamento no trust do OIDC |
 | 2 | **este** (`terraform.yml`) | ECR, regra do ALB, policies, SSM |
 | 3 | [OrcamentoPagamento-InfraSGBD](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-InfraSGBD) | RDS + `db-connection-string` no SSM |
 | 4 | [OrcamentoPagamento-service](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-service) | Push na `main` publica a imagem e dispara o `deploy.yml` daqui |
@@ -159,7 +159,7 @@ terraform apply
 | Recurso | Nome |
 |---|---|
 | ECR | `mechanicltda-orcamento` |
-| Target group + regra no ALB interno | `/api/orcamento*`, `/api/pagamento*`, `/api/webhooks/mercadopago` → NodePort 8081 |
+| Target group + regra no ALB interno | `/api/orcamento*`, `/api/pagamento*`, `/api/webhooks/mercadopago` → NodePort 8083 |
 | Policies inline | `mechanicltda-prod-ec2-role` e `-worker-role` (pull no ECR), `-github-actions` (push no ECR) |
 | SSM `/mechanicltda/prod/orcamento/` | `mercadopago-*` (opcionais) |
 

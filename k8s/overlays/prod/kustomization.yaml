@@ -22,7 +22,7 @@ images:
 
 patches:
   # NodePort fixo. O k3s do monólito aceita 8000-9000; 8080 e 8090 já são da API e do
-  # Web do monólito. A 8081 é liberada para o ALB interno no security group dos nós
+  # Web do monólito; 8081 é do OS Service e 8082 da Execução. A 8083 é liberada para o ALB interno no security group dos nós
   # (InfraKubernete) e recebe as rotas /api/orcamento e /api/pagamento (infra/alb.tf).
   - target:
       kind: Service
@@ -33,7 +33,7 @@ patches:
         value: NodePort
       - op: add
         path: /spec/ports/0/nodePort
-        value: 8081
+        value: 8083
 
   # ECR exige autenticação para pull. O Secret docker-registry "ecr-creds" deste
   # namespace é criado a cada deploy e renovado a cada 6h por um timer que a pipeline

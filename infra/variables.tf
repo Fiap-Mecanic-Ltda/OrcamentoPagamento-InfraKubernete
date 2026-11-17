@@ -49,7 +49,7 @@ variable "ecr_repository_name" {
 variable "node_port" {
   type        = number
   description = "NodePort do Service orcamento-api (k8s/overlays/prod). 8080 e 8090 sao do monolito."
-  default     = 8081
+  default     = 8083
 }
 
 # Rotas que o ALB interno desvia para este servico. O API Gateway manda todo o

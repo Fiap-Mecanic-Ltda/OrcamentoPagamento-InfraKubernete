@@ -3,10 +3,10 @@
 #
 # O API Gateway (repositorio Lambda) ja manda todo o /api/* para o listener do
 # ALB. Esta regra desvia os caminhos do orcamento e do pagamento para o
-# NodePort 8081 antes da acao padrao, que segue para a API do monolito (8080).
+# NodePort 8083 antes da acao padrao, que segue para a API do monolito (8080).
 #
 # Pre-requisito no InfraKubernete do monolito: os SGs do server e dos workers
-# precisam aceitar a 8081 vindo do SG do ALB (o egress do ALB ja cobre 8080-8090).
+# precisam aceitar a 8083 vindo do SG do ALB (o egress do ALB ja cobre 8080-8090).
 
 resource "aws_lb_target_group" "orcamento" {
   name        = "${var.project_name}-${var.environment}-orc-tg"
