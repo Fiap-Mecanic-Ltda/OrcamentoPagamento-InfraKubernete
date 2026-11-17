@@ -15,26 +15,6 @@ data "aws_iam_policy_document" "nodes" {
     ]
     resources = [aws_ecr_repository.orcamento.arn]
   }
-
-  statement {
-    sid       = "SnsPublicaEventosOrcamento"
-    effect    = "Allow"
-    actions   = ["sns:Publish"]
-    resources = [aws_sns_topic.orcamento_eventos.arn]
-  }
-
-  statement {
-    sid    = "SqsConsomeItensAlterados"
-    effect = "Allow"
-    actions = [
-      "sqs:ReceiveMessage",
-      "sqs:DeleteMessage",
-      "sqs:ChangeMessageVisibility",
-      "sqs:GetQueueAttributes",
-      "sqs:GetQueueUrl",
-    ]
-    resources = [aws_sqs_queue.itens_alterados.arn]
-  }
 }
 
 resource "aws_iam_role_policy" "ec2_orcamento" {

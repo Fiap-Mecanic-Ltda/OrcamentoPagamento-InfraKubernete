@@ -4,27 +4,13 @@
 #
 # Outros parametros do mesmo prefixo, criados em outros repositorios:
 #   db-connection-string  -> OrcamentoPagamento-InfraSGBD (RDS)
-# E do prefixo do monolito, reaproveitado:
-#   /projeto/ambiente/jwt-secret-key -> mesma chave que valida os tokens
-
-resource "aws_ssm_parameter" "topico_eventos_arn" {
-  name  = "${local.ssm_path_prefix}/topico-eventos-arn"
-  type  = "String"
-  value = aws_sns_topic.orcamento_eventos.arn
-}
-
-resource "aws_ssm_parameter" "fila_itens_alterados_url" {
-  name  = "${local.ssm_path_prefix}/fila-itens-alterados-url"
-  type  = "String"
-  value = aws_sqs_queue.itens_alterados.id
-}
-
-# Para o monolito publicar os eventos de itens alterados.
-resource "aws_ssm_parameter" "ordem_servico_topic_arn" {
-  name  = "${local.ssm_cluster_prefix}/ordem-servico-eventos-arn"
-  type  = "String"
-  value = aws_sns_topic.ordem_servico_eventos.arn
-}
+# E do prefixo do monolito (InfraKubernete), reaproveitados:
+#   /projeto/ambiente/jwt-secret-key              -> mesma chave que valida os tokens
+#   /projeto/ambiente/mensageria/rabbitmq-user    -> usuario do RabbitMQ do cluster
+#   /projeto/ambiente/mensageria/rabbitmq-segredo -> senha do RabbitMQ do cluster
+#
+# A mensageria e o RabbitMQ do namespace "mensageria" (Saga da OS). SNS/SQS sairam:
+# nao ha mais topico, fila nem DLQ deste servico.
 
 # Mercado Pago: so existem quando informados. Sem o access token, o deploy
 # mantem Pagamentos__Habilitado=false (gateway fake). nonsensitive() so no

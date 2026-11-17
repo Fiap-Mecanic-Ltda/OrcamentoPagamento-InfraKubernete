@@ -41,6 +41,20 @@ spec:
                 secretKeyRef:
                   name: orcamento-secrets
                   key: JWT_SECRET_KEY
+            # Credenciais do RabbitMQ (Saga). Opcionais: sem elas a mensageria fica
+            # desligada (Mensageria__Habilitada no ConfigMap).
+            - name: RabbitMq__Usuario
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: RabbitMq__Usuario
+                  optional: true
+            - name: RabbitMq__Senha
+              valueFrom:
+                secretKeyRef:
+                  name: orcamento-secrets
+                  key: RabbitMq__Senha
+                  optional: true
             - name: Pagamentos__MercadoPago__AccessToken
               valueFrom:
                 secretKeyRef:

@@ -1,8 +1,8 @@
 # Requer o metrics-server no cluster (o k3s já traz).
 #
 # Várias réplicas são seguras para este serviço: as migrations do EF Core usam
-# sp_getapplock (só uma réplica migra por vez), não há seed, e o consumidor SQS usa
-# visibility timeout, então duas réplicas não processam a mesma mensagem ao mesmo tempo.
+# sp_getapplock (só uma réplica migra por vez), não há seed, e as filas da Saga no RabbitMQ
+# entregam cada mensagem a uma réplica só (consumidores concorrentes na mesma fila).
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
