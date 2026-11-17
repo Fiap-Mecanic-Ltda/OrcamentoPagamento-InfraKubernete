@@ -1,0 +1,33 @@
+# Configuração não sensível do microsserviço. Segredos NÃO vão aqui — ver secret.yaml.
+# As chaves seguem o mapeamento do .NET: "__" separa seções (Mensageria__Habilitada =
+# Mensageria:Habilitada no appsettings).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orcamento-config
+  namespace: orcamento
+  labels:
+    app.kubernetes.io/part-of: orcamento-pagamento
+data:
+  ASPNETCORE_ENVIRONMENT: "Production"
+
+  # Mesmos emissores e audiência do monólito: o microsserviço só valida os tokens
+  # emitidos pela API (e-mail/senha) e pela Lambda de autenticação por CPF.
+  JwtSettings__Issuer: "MechanicLtda.API"
+  JwtSettings__IssuerCpf: "MechanicLtda.Auth.Cpf"
+  JwtSettings__Audience: "MechanicLtda.Clients"
+
+  # Saga da OS pelo RabbitMQ (docs/contratos-eventos.md do serviço). Desligada na base:
+  # em produção o deploy.yml liga quando as credenciais do RabbitMQ existem no SSM; no
+  # local, o overlay liga e aponta para o RabbitMQ do próprio overlay. Usuário e senha
+  # vêm do Secret (RabbitMq__Usuario / RabbitMq__Senha).
+  Mensageria__Habilitada: "false"
+  Mensageria__Transporte: "RabbitMq"
+  # RabbitMQ do namespace "mensageria", instalado pelo InfraKubernete.
+  RabbitMq__Host: "rabbitmq.mensageria.svc.cluster.local"
+  RabbitMq__Porta: "5672"
+  RabbitMq__VirtualHost: "/"
+
+  # Pagamento. "false" usa o gateway fake, que não toca no Mercado Pago. Ligar exige o
+  # access token no Secret (MERCADOPAGO_ACCESS_TOKEN).
+  Pagamentos__Habilitado: "false"

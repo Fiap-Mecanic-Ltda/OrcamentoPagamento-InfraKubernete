@@ -1,0 +1,280 @@
+name: Deploy no Kubernetes (k3s) - Orcamento
+
+# Aplica k8s/overlays/prod no k3s compartilhado (EC2 do InfraKubernete do
+# monolito), no namespace "orcamento". Mesmo mecanismo do monolito: sem
+# kubeconfig exposto, os manifestos vao para o S3 e sao aplicados na instancia
+# via SSM Run Command.
+#
+# Dispara quando os manifestos mudam, sob demanda, e por repository_dispatch do
+# OrcamentoPagamento-service logo depois de publicar a imagem no ECR.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "k8s/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag da imagem no ECR (vazio = ultima imagem publicada)"
+        type: string
+        required: false
+        default: ""
+  repository_dispatch:
+    types: [imagem-publicada]
+
+permissions:
+  contents: read
+  id-token: write
+
+# Grupo proprio: um deploy do orcamento nao espera nem cancela o do monolito.
+concurrency:
+  group: deploy-k8s-orcamento-prod
+  cancel-in-progress: false
+
+env:
+  STATE_BUCKET: mechanicltda-terraform-state-788516091173
+  NAMESPACE: orcamento
+
+jobs:
+  read-tf-vars:
+    name: Le variaveis padrao do Terraform
+    runs-on: ubuntu-latest
+    outputs:
+      aws_region: ${{ steps.vars.outputs.aws_region }}
+      project_name: ${{ steps.vars.outputs.project_name }}
+      environment: ${{ steps.vars.outputs.environment }}
+      service_name: ${{ steps.vars.outputs.service_name }}
+      ecr_repository_name: ${{ steps.vars.outputs.ecr_repository_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Extrai defaults do variables.tf
+        id: vars
+        run: |
+          for name in aws_region project_name environment service_name ecr_repository_name; do
+            value=$(awk "/variable \"$name\"/,/^}/" infra/variables.tf | grep default | sed -E 's/.*default[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/')
+            if [ -z "$value" ]; then
+              echo "::error::Nao encontrei o default de $name em infra/variables.tf"
+              exit 1
+            fi
+            echo "$name=$value" >> "$GITHUB_OUTPUT"
+          done
+
+  deploy:
+    name: Aplica os manifestos via SSM
+    needs: read-tf-vars
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ needs.read-tf-vars.outputs.aws_region }}
+      PROJECT_NAME: ${{ needs.read-tf-vars.outputs.project_name }}
+      ENVIRONMENT: ${{ needs.read-tf-vars.outputs.environment }}
+      SERVICE_NAME: ${{ needs.read-tf-vars.outputs.service_name }}
+      ECR_REPOSITORY: ${{ needs.read-tf-vars.outputs.ecr_repository_name }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Configura credenciais AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login no ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2.1.7
+
+      # Tag imutavel (SHA) em vez de "latest": o Deployment usa
+      # imagePullPolicy IfNotPresent. A tag chega por variavel de ambiente para
+      # nao permitir injecao de comando via input/payload.
+      - name: Resolve a tag da imagem
+        id: image
+        env:
+          TAG_INFORMADA: ${{ inputs.image_tag || github.event.client_payload.image_tag }}
+        run: |
+          TAG="$TAG_INFORMADA"
+          if [ -n "$TAG" ] && ! printf '%s' "$TAG" | grep -Eq '^[A-Za-z0-9._-]{1,128}$'; then
+            echo "::error::Tag de imagem invalida: use apenas letras, digitos, '.', '_' e '-'."
+            exit 1
+          fi
+          if [ -z "$TAG" ]; then
+            TAG=$(aws ecr describe-images \
+              --repository-name "$ECR_REPOSITORY" \
+              --query 'sort_by(imageDetails,&imagePushedAt)[-1].imageTags' \
+              --output text | tr '\t' '\n' | grep -v '^latest$' | head -n1)
+          fi
+          if [ -z "$TAG" ] || [ "$TAG" = "None" ]; then
+            echo "::error::Nenhuma imagem encontrada no ECR ($ECR_REPOSITORY). Rode a pipeline do OrcamentoPagamento-service primeiro, ou informe image_tag."
+            exit 1
+          fi
+          echo "Usando a tag: $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Descobre o Instance ID do server k3s
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${PROJECT_NAME}-${ENVIRONMENT}-api" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "::error::Nao encontrei o server k3s rodando. Aplique o InfraKubernete do monolito antes."
+            exit 1
+          fi
+          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
+
+      # Renderiza o overlay e injeta o que so se sabe no deploy: a imagem do
+      # ECR, se a Saga liga (credenciais do RabbitMQ no SSM) e se o pagamento
+      # real esta ligado. yq ja vem no runner ubuntu-latest.
+      - name: Renderiza os manifestos (kustomize)
+        env:
+          IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image.outputs.tag }}
+        run: |
+          PREFIX_CLUSTER="/${PROJECT_NAME}/${ENVIRONMENT}"
+          PREFIX="${PREFIX_CLUSTER}/${SERVICE_NAME}"
+
+          # Saga da OS (RabbitMQ do namespace mensageria) so com as credenciais
+          # que o InfraKubernete grava no SSM; sem elas, a API sobe sem broker.
+          if aws ssm get-parameter --name "$PREFIX_CLUSTER/mensageria/rabbitmq-segredo" >/dev/null 2>&1; then
+            export MENSAGERIA_HABILITADA=true
+          else
+            export MENSAGERIA_HABILITADA=false
+            echo "::notice::Sem mensageria/rabbitmq-segredo no SSM: a Saga fica desligada (Mensageria__Habilitada=false)."
+          fi
+
+          # Pagamento real so com o access token no SSM; sem ele, gateway fake.
+          if aws ssm get-parameter --name "$PREFIX/mercadopago-access-token" >/dev/null 2>&1; then
+            export PAGAMENTOS_HABILITADO=true
+          else
+            export PAGAMENTOS_HABILITADO=false
+            echo "::notice::Sem mercadopago-access-token no SSM: pagamento sobe com o gateway fake."
+          fi
+
+          kubectl kustomize k8s/overlays/prod > /tmp/app-manifests.yaml
+
+          yq -i '
+            (select(.kind == "Deployment" and .metadata.name == "orcamento-api")
+              | .spec.template.spec.containers[0].image) = strenv(IMAGE) |
+            (select(.kind == "ConfigMap" and .metadata.name == "orcamento-config") | .data) *= {
+              "Mensageria__Habilitada": strenv(MENSAGERIA_HABILITADA),
+              "Pagamentos__Habilitado": strenv(PAGAMENTOS_HABILITADO)
+            }
+          ' /tmp/app-manifests.yaml
+
+          grep -q "image: ${IMAGE}" /tmp/app-manifests.yaml || { echo "::error::Imagem nao aplicada no Deployment"; exit 1; }
+
+      # Segredos vem do SSM e o Secret e montado em runtime, nunca versionado.
+      - name: Monta o Secret a partir do SSM Parameter Store
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          PREFIX_CLUSTER="/${PROJECT_NAME}/${ENVIRONMENT}"
+          PREFIX="${PREFIX_CLUSTER}/${SERVICE_NAME}"
+          get_param() { aws ssm get-parameter --name "$1" --with-decryption --query 'Parameter.Value' --output text; }
+          # Opcionais: ausentes no SSM viram string vazia (o Deployment trata
+          # como optional e o servico cai no gateway fake / webhook sem assinatura).
+          get_optional() { aws ssm get-parameter --name "$1" --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || true; }
+
+          DB_CONNECTION="$(get_param $PREFIX/db-connection-string)" || {
+            echo "::error::Sem $PREFIX/db-connection-string no SSM. Aplique o OrcamentoPagamento-InfraSGBD antes."
+            exit 1
+          }
+          JWT_SECRET_KEY="$(get_param $PREFIX_CLUSTER/jwt-secret-key)"
+          MP_ACCESS_TOKEN="$(get_optional $PREFIX/mercadopago-access-token)"
+          MP_WEBHOOK_SECRET="$(get_optional $PREFIX/mercadopago-webhook-secret)"
+          MP_NOTIFICATION_URL="$(get_optional $PREFIX/mercadopago-notification-url)"
+          # Mesmas credenciais do RabbitMQ que o OS Service e a Execucao usam.
+          RABBITMQ_USER="$(get_optional $PREFIX_CLUSTER/mensageria/rabbitmq-user)"
+          RABBITMQ_SEGREDO="$(get_optional $PREFIX_CLUSTER/mensageria/rabbitmq-segredo)"
+
+          # Vem do SSM, nao de secrets do GitHub: sem a mascara, apareceriam no log.
+          for v in "$DB_CONNECTION" "$JWT_SECRET_KEY" "$MP_ACCESS_TOKEN" "$MP_WEBHOOK_SECRET" "$RABBITMQ_SEGREDO"; do
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done
+
+          kubectl create secret generic orcamento-secrets \
+            --namespace "$NAMESPACE" \
+            --from-literal=ConnectionStrings__DefaultConnection="$DB_CONNECTION" \
+            --from-literal=JWT_SECRET_KEY="$JWT_SECRET_KEY" \
+            --from-literal=MERCADOPAGO_ACCESS_TOKEN="$MP_ACCESS_TOKEN" \
+            --from-literal=MERCADOPAGO_WEBHOOK_SECRET="$MP_WEBHOOK_SECRET" \
+            --from-literal=MERCADOPAGO_NOTIFICATION_URL="$MP_NOTIFICATION_URL" \
+            --from-literal=RabbitMq__Usuario="$RABBITMQ_USER" \
+            --from-literal=RabbitMq__Senha="$RABBITMQ_SEGREDO" \
+            --dry-run=client -o yaml > /tmp/secret-manifest.yaml
+
+          echo "---" >> /tmp/secret-manifest.yaml
+
+          kubectl create secret docker-registry ecr-creds \
+            --namespace "$NAMESPACE" \
+            --docker-server="${ECR_REGISTRY}" \
+            --docker-username=AWS \
+            --docker-password="$(aws ecr get-login-password --region "$AWS_REGION")" \
+            --dry-run=client -o yaml >> /tmp/secret-manifest.yaml
+
+      # O token do ECR expira em 12h. O user_data da EC2 so renova o ecr-creds
+      # do namespace do monolito; este passo instala (idempotente) um timer
+      # irmao para o namespace do orcamento, copiando o script de la. Assim nao
+      # e preciso mexer no user_data, o que recriaria a EC2.
+      - name: Gera o script do timer de refresh do ECR
+        run: |
+          cat > /tmp/refresh-ecr-orcamento.sh <<EOF
+          #!/bin/bash
+          set -eu
+          sed 's/--namespace mechanicltda/--namespace ${NAMESPACE}/' /opt/refresh-ecr-creds.sh > /opt/refresh-ecr-creds-${NAMESPACE}.sh
+          chmod 700 /opt/refresh-ecr-creds-${NAMESPACE}.sh
+          sed 's#/opt/refresh-ecr-creds.sh#/opt/refresh-ecr-creds-${NAMESPACE}.sh#' /etc/systemd/system/refresh-ecr-creds.service > /etc/systemd/system/refresh-ecr-creds-${NAMESPACE}.service
+          sed 's/refresh-ecr-creds.service/refresh-ecr-creds-${NAMESPACE}.service/' /etc/systemd/system/refresh-ecr-creds.timer > /etc/systemd/system/refresh-ecr-creds-${NAMESPACE}.timer
+          systemctl daemon-reload
+          systemctl enable --now refresh-ecr-creds-${NAMESPACE}.timer
+          EOF
+
+      - name: Envia os manifestos para a instancia via SSM e aplica
+        run: |
+          APP_KEY="deploy/orcamento-app-${{ github.sha }}-${{ github.run_attempt }}.yaml"
+          SECRET_KEY="deploy/orcamento-secret-${{ github.sha }}-${{ github.run_attempt }}.yaml"
+          TIMER_KEY="deploy/orcamento-timer-${{ github.sha }}-${{ github.run_attempt }}.sh"
+          aws s3 cp /tmp/app-manifests.yaml "s3://${STATE_BUCKET}/${APP_KEY}"
+          aws s3 cp /tmp/secret-manifest.yaml "s3://${STATE_BUCKET}/${SECRET_KEY}"
+          aws s3 cp /tmp/refresh-ecr-orcamento.sh "s3://${STATE_BUCKET}/${TIMER_KEY}"
+
+          # O namespace vem no app-manifests; ele e aplicado antes dos Secrets
+          # (dois applies separados, pelo mesmo motivo do monolito: misturar
+          # HPA e Secret no mesmo stream corrompia o patch).
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "{\"commands\":[\"set -e\",\"export KUBECONFIG=/etc/rancher/k3s/k3s.yaml\",\"aws s3 cp s3://${STATE_BUCKET}/${APP_KEY} - | /usr/local/bin/kubectl apply -f -\",\"aws s3 cp s3://${STATE_BUCKET}/${SECRET_KEY} - | /usr/local/bin/kubectl apply -f -\",\"aws s3 cp s3://${STATE_BUCKET}/${TIMER_KEY} - | bash\"]}" \
+            --query "Command.CommandId" --output text)
+
+          bash "$GITHUB_WORKSPACE/scripts/esperar-ssm.sh" "$COMMAND_ID" "$INSTANCE_ID" 600 > /tmp/invocation.json || true
+          cat /tmp/invocation.json
+
+          aws s3 rm "s3://${STATE_BUCKET}/${APP_KEY}" || true
+          aws s3 rm "s3://${STATE_BUCKET}/${SECRET_KEY}" || true
+          aws s3 rm "s3://${STATE_BUCKET}/${TIMER_KEY}" || true
+
+          STATUS=$(python3 -c "import json;print(json.load(open('/tmp/invocation.json'))['Status'])")
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::Falha ao aplicar os manifestos via SSM (status: $STATUS)"
+            exit 1
+          fi
+
+      # O Secret e aplicado depois do Deployment: o restart garante que os pods
+      # leiam o valor novo mesmo quando a imagem nao mudou.
+      - name: Reinicia e aguarda o rollout via SSM
+        run: |
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "{\"commands\":[\"set -e\",\"export KUBECONFIG=/etc/rancher/k3s/k3s.yaml\",\"/usr/local/bin/kubectl rollout restart deployment/orcamento-api -n ${NAMESPACE}\",\"/usr/local/bin/kubectl rollout status deployment/orcamento-api -n ${NAMESPACE} --timeout=300s\"]}" \
+            --query "Command.CommandId" --output text)
+
+          bash "$GITHUB_WORKSPACE/scripts/esperar-ssm.sh" "$COMMAND_ID" "$INSTANCE_ID" 360 > /tmp/rollout.json || true
+          cat /tmp/rollout.json
+          STATUS=$(python3 -c "import json;print(json.load(open('/tmp/rollout.json'))['Status'])")
+          if [ "$STATUS" != "Success" ]; then
+            echo "::error::Rollout nao completou a tempo (status: $STATUS)"
+            exit 1
+          fi

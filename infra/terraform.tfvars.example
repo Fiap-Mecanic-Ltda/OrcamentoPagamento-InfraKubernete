@@ -1,0 +1,15 @@
+# Copie para terraform.tfvars (ignorado pelo git). Nunca commite valores reais.
+#
+# Tudo aqui e opcional: sem nada preenchido, o servico sobe com o gateway de
+# pagamento fake. No CI, os valores vem dos secrets do repositorio
+# (MERCADOPAGO_ACCESS_TOKEN, MERCADOPAGO_WEBHOOK_SECRET) e da variable
+# MERCADOPAGO_NOTIFICATION_URL.
+
+# Access token de TESTE (TEST-...), da mesma aplicacao cuja public key o Web usa.
+mercadopago_access_token = ""
+
+# Secret da validacao do x-signature (painel do Mercado Pago > Webhooks).
+mercadopago_webhook_secret = ""
+
+# URL publica do webhook: <api_base_url do stack da Lambda>/api/webhooks/mercadopago
+mercadopago_notification_url = ""

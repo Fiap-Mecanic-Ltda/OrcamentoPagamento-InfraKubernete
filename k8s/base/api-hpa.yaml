@@ -1,0 +1,38 @@
+# Requer o metrics-server no cluster (o k3s já traz).
+#
+# Várias réplicas são seguras para este serviço: as migrations do EF Core usam
+# sp_getapplock (só uma réplica migra por vez), não há seed, e as filas da Saga no RabbitMQ
+# entregam cada mensagem a uma réplica só (consumidores concorrentes na mesma fila).
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: orcamento-api
+  namespace: orcamento
+  labels:
+    app.kubernetes.io/part-of: orcamento-pagamento
+    app.kubernetes.io/name: orcamento-api
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: orcamento-api
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 120
+    scaleUp:
+      stabilizationWindowSeconds: 0

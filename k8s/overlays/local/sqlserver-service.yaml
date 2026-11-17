@@ -1,0 +1,17 @@
+# ClusterIP: o banco só precisa ser alcançável pela API dentro do cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: orcamento-sqlserver
+  namespace: orcamento
+  labels:
+    app.kubernetes.io/part-of: orcamento-pagamento
+    app.kubernetes.io/name: orcamento-sqlserver
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: orcamento-sqlserver
+  ports:
+    - name: tcp-mssql
+      port: 1433
+      targetPort: 1433

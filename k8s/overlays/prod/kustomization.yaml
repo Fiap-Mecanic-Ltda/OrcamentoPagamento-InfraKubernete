@@ -1,0 +1,61 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: orcamento
+
+# Produção: o mesmo k3s na EC2 do InfraKubernete do monólito. Sem pod de banco (RDS do
+# OrcamentoPagamento-InfraSGBD) nem de RabbitMQ (o do namespace "mensageria", instalado
+# pelo InfraKubernete).
+#
+# A infra vem do Terraform em infra/ (ECR, regra no ALB, IAM, SSM) e do
+# OrcamentoPagamento-InfraSGBD (RDS). O que só se sabe no deploy — imagem do ECR, se a
+# Saga liga (credenciais do RabbitMQ no SSM) e se o pagamento real está ligado — é
+# injetado pela pipeline (.github/workflows/deploy.yml) no manifesto renderizado.
+resources:
+  - ../../base
+
+# Placeholder: a pipeline substitui pela imagem do ECR com a tag do SHA publicado.
+images:
+  - name: orcamento-api
+    newName: ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/mechanicltda-orcamento
+    newTag: latest
+
+patches:
+  # NodePort fixo. O k3s do monólito aceita 8000-9000; 8080 e 8090 já são da API e do
+  # Web do monólito; 8081 é do OS Service e 8082 da Execução. A 8083 é liberada para o ALB interno no security group dos nós
+  # (InfraKubernete) e recebe as rotas /api/orcamento e /api/pagamento (infra/alb.tf).
+  - target:
+      kind: Service
+      name: orcamento-api
+    patch: |-
+      - op: replace
+        path: /spec/type
+        value: NodePort
+      - op: add
+        path: /spec/ports/0/nodePort
+        value: 8083
+
+  # ECR exige autenticação para pull. O Secret docker-registry "ecr-creds" deste
+  # namespace é criado a cada deploy e renovado a cada 6h por um timer que a pipeline
+  # instala na EC2 (refresh-ecr-creds-orcamento), irmão do timer do monólito.
+  - target:
+      kind: Deployment
+      name: orcamento-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/imagePullSecrets
+        value:
+          - name: ecr-creds
+
+  # Remove o Secret placeholder da base: o real vem do SSM Parameter Store, recriado
+  # pela pipeline a cada deploy.
+  - target:
+      kind: Secret
+      name: orcamento-secrets
+    patch: |-
+      $patch: delete
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: orcamento-secrets
+        namespace: orcamento
