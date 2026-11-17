@@ -22,7 +22,7 @@ Este repositório só acrescenta ao cluster o que é do orçamento.
 ```
 .
 ├── .github/workflows/
-│   ├── terraform.yml               # plan (homolog/PR) e apply (main, Environment production)
+│   ├── terraform.yml               # plan (homologacao/PR) e apply (main, Environment production)
 │   └── deploy.yml                  # kustomize + SSM Run Command no server k3s
 ├── infra/                          # Terraform (state em s3://.../prod/orcamento/terraform.tfstate)
 │   ├── data.tf                     # remote state do InfraKubernete do monólito + roles existentes
