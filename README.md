@@ -118,7 +118,7 @@ orcamento-api:latest`, em vez de usar o `deploy-local.sh`.
 - **Secret fora do Git.** `base/secret.yaml` só documenta as chaves esperadas. Os dois overlays
   removem esse placeholder: no local, o Secret vem do `.env` pelo `deploy-local.sh`; em
   produção, virá do SSM Parameter Store pela pipeline.
-- **HPA com até 3 réplicas.** É seguro para este serviço: as migrations do EF Core 9 usam lock
+- **HPA com até 3 réplicas, só por CPU** (alvo de 70%, subida de no máximo 1 pod por minuto depois de uma janela de 120s; a memória do .NET em repouso deixava o HPA preso no máximo). É seguro para este serviço: as migrations do EF Core 9 usam lock
   (`sp_getapplock`), então só uma réplica migra por vez; não há seed; e as réplicas dividem as filas
   `billing-*` do RabbitMQ como consumidores concorrentes, com idempotência por
   `correlationId`.
