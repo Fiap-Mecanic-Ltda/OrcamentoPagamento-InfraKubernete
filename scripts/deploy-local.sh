@@ -48,7 +48,7 @@ importar orcamento-api:latest
 
 # Imagens de terceiros: importa a cópia do host se existir (evita baixar ~2 GB do SQL
 # Server de novo). Se não existir ou o import falhar, o k3s baixa sozinho na subida.
-for img in mcr.microsoft.com/mssql/server:2022-latest localstack/localstack:3 busybox:1.36; do
+for img in mcr.microsoft.com/mssql/server:2022-latest rabbitmq:3.13-management busybox:1.36; do
   if docker image inspect "$img" >/dev/null 2>&1; then
     echo "    $img"
     importar "$img" || echo "      (falhou; o k3s vai baixar do registry)"
@@ -64,6 +64,8 @@ kubectl create secret generic orcamento-secrets -n "$NS" \
   --from-literal=MERCADOPAGO_ACCESS_TOKEN="${MERCADOPAGO_ACCESS_TOKEN:-}" \
   --from-literal=MERCADOPAGO_WEBHOOK_SECRET="${MERCADOPAGO_WEBHOOK_SECRET:-}" \
   --from-literal=MERCADOPAGO_NOTIFICATION_URL="${MERCADOPAGO_NOTIFICATION_URL:-}" \
+  --from-literal=RabbitMq__Usuario="${RABBITMQ_USER:-orcamento}" \
+  --from-literal=RabbitMq__Senha="${RABBITMQ_PASSWORD:-orcamento}" \
   --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 echo "==> Aplicando k8s/overlays/local"
@@ -75,7 +77,7 @@ kubectl rollout restart deployment/orcamento-api -n "$NS" >/dev/null
 
 echo "==> Aguardando os pods"
 kubectl rollout status deployment/orcamento-sqlserver -n "$NS" --timeout=300s
-kubectl rollout status deployment/orcamento-localstack -n "$NS" --timeout=300s
+kubectl rollout status deployment/orcamento-rabbitmq -n "$NS" --timeout=300s
 kubectl rollout status deployment/orcamento-api -n "$NS" --timeout=420s
 
 kubectl get pods,svc,hpa -n "$NS"

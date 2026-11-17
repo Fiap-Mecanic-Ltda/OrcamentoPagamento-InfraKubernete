@@ -124,18 +124,24 @@ jobs:
       - name: Setup kubectl
         uses: azure/setup-kubectl@776406bce94f63e41d621b960d78ee25c8b76ede # v4.0.1
 
-      # Renderiza o overlay e injeta o que so existe depois do Terraform: a
-      # imagem do ECR e os enderecos de SNS/SQS (lidos do SSM). yq ja vem no
-      # runner ubuntu-latest.
+      # Renderiza o overlay e injeta o que so se sabe no deploy: a imagem do
+      # ECR, se a Saga liga (credenciais do RabbitMQ no SSM) e se o pagamento
+      # real esta ligado. yq ja vem no runner ubuntu-latest.
       - name: Renderiza os manifestos (kustomize)
         env:
           IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.image.outputs.tag }}
         run: |
-          PREFIX="/${PROJECT_NAME}/${ENVIRONMENT}/${SERVICE_NAME}"
-          get_param() { aws ssm get-parameter --name "$1" --with-decryption --query 'Parameter.Value' --output text; }
+          PREFIX_CLUSTER="/${PROJECT_NAME}/${ENVIRONMENT}"
+          PREFIX="${PREFIX_CLUSTER}/${SERVICE_NAME}"
 
-          export TOPICO_EVENTOS_ARN="$(get_param $PREFIX/topico-eventos-arn)"
-          export FILA_ITENS_ALTERADOS_URL="$(get_param $PREFIX/fila-itens-alterados-url)"
+          # Saga da OS (RabbitMQ do namespace mensageria) so com as credenciais
+          # que o InfraKubernete grava no SSM; sem elas, a API sobe sem broker.
+          if aws ssm get-parameter --name "$PREFIX_CLUSTER/mensageria/rabbitmq-segredo" >/dev/null 2>&1; then
+            export MENSAGERIA_HABILITADA=true
+          else
+            export MENSAGERIA_HABILITADA=false
+            echo "::notice::Sem mensageria/rabbitmq-segredo no SSM: a Saga fica desligada (Mensageria__Habilitada=false)."
+          fi
 
           # Pagamento real so com o access token no SSM; sem ele, gateway fake.
           if aws ssm get-parameter --name "$PREFIX/mercadopago-access-token" >/dev/null 2>&1; then
@@ -151,8 +157,7 @@ jobs:
             (select(.kind == "Deployment" and .metadata.name == "orcamento-api")
               | .spec.template.spec.containers[0].image) = strenv(IMAGE) |
             (select(.kind == "ConfigMap" and .metadata.name == "orcamento-config") | .data) *= {
-              "Messaging__TopicoEventosArn": strenv(TOPICO_EVENTOS_ARN),
-              "Messaging__FilaItensAlteradosUrl": strenv(FILA_ITENS_ALTERADOS_URL),
+              "Mensageria__Habilitada": strenv(MENSAGERIA_HABILITADA),
               "Pagamentos__Habilitado": strenv(PAGAMENTOS_HABILITADO)
             }
           ' /tmp/app-manifests.yaml
@@ -179,9 +184,12 @@ jobs:
           MP_ACCESS_TOKEN="$(get_optional $PREFIX/mercadopago-access-token)"
           MP_WEBHOOK_SECRET="$(get_optional $PREFIX/mercadopago-webhook-secret)"
           MP_NOTIFICATION_URL="$(get_optional $PREFIX/mercadopago-notification-url)"
+          # Mesmas credenciais do RabbitMQ que o OS Service e a Execucao usam.
+          RABBITMQ_USER="$(get_optional $PREFIX_CLUSTER/mensageria/rabbitmq-user)"
+          RABBITMQ_SEGREDO="$(get_optional $PREFIX_CLUSTER/mensageria/rabbitmq-segredo)"
 
           # Vem do SSM, nao de secrets do GitHub: sem a mascara, apareceriam no log.
-          for v in "$DB_CONNECTION" "$JWT_SECRET_KEY" "$MP_ACCESS_TOKEN" "$MP_WEBHOOK_SECRET"; do
+          for v in "$DB_CONNECTION" "$JWT_SECRET_KEY" "$MP_ACCESS_TOKEN" "$MP_WEBHOOK_SECRET" "$RABBITMQ_SEGREDO"; do
             if [ -n "$v" ]; then echo "::add-mask::$v"; fi
           done
 
@@ -192,6 +200,8 @@ jobs:
             --from-literal=MERCADOPAGO_ACCESS_TOKEN="$MP_ACCESS_TOKEN" \
             --from-literal=MERCADOPAGO_WEBHOOK_SECRET="$MP_WEBHOOK_SECRET" \
             --from-literal=MERCADOPAGO_NOTIFICATION_URL="$MP_NOTIFICATION_URL" \
+            --from-literal=RabbitMq__Usuario="$RABBITMQ_USER" \
+            --from-literal=RabbitMq__Senha="$RABBITMQ_SEGREDO" \
             --dry-run=client -o yaml > /tmp/secret-manifest.yaml
 
           echo "---" >> /tmp/secret-manifest.yaml

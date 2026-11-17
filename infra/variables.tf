@@ -72,26 +72,6 @@ variable "alb_rule_priority" {
   default     = 10
 }
 
-# Mensageria
-
-variable "sqs_visibility_timeout_seconds" {
-  type        = number
-  description = "Precisa ser >= Messaging:VisibilityTimeoutSegundos do servico (padrao 60)."
-  default     = 60
-}
-
-variable "sqs_max_receive_count" {
-  type        = number
-  description = "Tentativas de processamento antes de a mensagem ir para a DLQ."
-  default     = 5
-}
-
-variable "sqs_dlq_retention_seconds" {
-  type        = number
-  description = "Retencao da DLQ. 14 dias (maximo) para dar tempo de reprocessar."
-  default     = 1209600
-}
-
 # Mercado Pago. Todos opcionais: vazios, o parametro nao e criado no SSM e o
 # deploy sobe o servico com o gateway de pagamento fake.
 

@@ -4,12 +4,13 @@ kind: Kustomization
 namespace: orcamento
 
 # Produção: o mesmo k3s na EC2 do InfraKubernete do monólito. Sem pod de banco (RDS do
-# OrcamentoPagamento-InfraSGBD) nem LocalStack (SNS/SQS reais).
+# OrcamentoPagamento-InfraSGBD) nem de RabbitMQ (o do namespace "mensageria", instalado
+# pelo InfraKubernete).
 #
-# A infra vem do Terraform em infra/ (ECR, SNS/SQS, regra no ALB, IAM, SSM) e do
-# OrcamentoPagamento-InfraSGBD (RDS). O que só existe depois do apply — imagem do ECR,
-# ARN do tópico, URL da fila e se o pagamento real está ligado — é injetado pela
-# pipeline (.github/workflows/deploy.yml) no manifesto renderizado.
+# A infra vem do Terraform em infra/ (ECR, regra no ALB, IAM, SSM) e do
+# OrcamentoPagamento-InfraSGBD (RDS). O que só se sabe no deploy — imagem do ECR, se a
+# Saga liga (credenciais do RabbitMQ no SSM) e se o pagamento real está ligado — é
+# injetado pela pipeline (.github/workflows/deploy.yml) no manifesto renderizado.
 resources:
   - ../../base
 
@@ -20,17 +21,6 @@ images:
     newTag: latest
 
 patches:
-  # SNS/SQS reais. Os endereços (Messaging__TopicoEventosArn e
-  # Messaging__FilaItensAlteradosUrl) vêm do SSM no deploy; as credenciais, da role da
-  # instância (IMDS), sem access key no pod.
-  - target:
-      kind: ConfigMap
-      name: orcamento-config
-    patch: |-
-      - op: replace
-        path: /data/Messaging__Habilitado
-        value: "true"
-
   # NodePort fixo. O k3s do monólito aceita 8000-9000; 8080 e 8090 já são da API e do
   # Web do monólito. A 8081 é liberada para o ALB interno no security group dos nós
   # (InfraKubernete) e recebe as rotas /api/orcamento e /api/pagamento (infra/alb.tf).

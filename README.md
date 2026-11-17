@@ -8,13 +8,14 @@ monólito: `terraform plan/apply` e deploy no cluster.
 O serviço **não tem cluster próprio**: roda no k3s do monólito, no namespace `orcamento`.
 Este repositório só acrescenta ao cluster o que é do orçamento.
 
-- **`infra/`**: Terraform do ECR, SNS/SQS com DLQ, regra no ALB interno, policies nas roles
-  dos nós e do GitHub Actions e parâmetros no SSM.
-- **`k8s/overlays/local`**: desenvolvimento num cluster local, com SQL Server e LocalStack
-  (SNS/SQS) como pods.
+- **`infra/`**: Terraform do ECR, regra no ALB interno, policies nas roles dos nós e do
+  GitHub Actions e parâmetros no SSM.
+- **`k8s/overlays/local`**: desenvolvimento num cluster local, com SQL Server e RabbitMQ
+  como pods.
 - **`k8s/overlays/prod`**: o k3s da EC2 do monólito, com o banco no RDS do
   [OrcamentoPagamento-InfraSGBD](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-InfraSGBD)
-  e SNS/SQS reais.
+  e o RabbitMQ compartilhado do namespace `mensageria` (o mesmo da Saga do
+  [ordemservico-service](https://github.com/Fiap-Mecanic-Ltda/ordemservico-service)).
 
 ## Estrutura
 
@@ -26,14 +27,13 @@ Este repositório só acrescenta ao cluster o que é do orçamento.
 ├── infra/                          # Terraform (state em s3://.../prod/orcamento/terraform.tfstate)
 │   ├── data.tf                     # remote state do InfraKubernete do monólito + roles existentes
 │   ├── ecr.tf                      # mechanicltda-orcamento
-│   ├── messaging.tf                # SNS ordem-servico-eventos -> SQS itens-alterados -> DLQ; SNS orcamento-eventos
 │   ├── alb.tf                      # target group 8081 + regra /api/orcamento|pagamento|webhooks no ALB interno
-│   ├── iam.tf                      # SNS/SQS/ECR para os nós; push no ECR para o GitHub Actions
-│   └── ssm.tf                      # ARNs/URL da mensageria e segredos do Mercado Pago
+│   ├── iam.tf                      # pull no ECR para os nós; push no ECR para o GitHub Actions
+│   └── ssm.tf                      # segredos do Mercado Pago
 ├── k8s/
 │   ├── base/                       # Namespace, ConfigMap, Secret (placeholder), API: Deployment/Service/HPA
 │   └── overlays/
-│       ├── local/                  # + sqlserver, + localstack (com script de init), initContainers
+│       ├── local/                  # + sqlserver, + rabbitmq, initContainers
 │       └── prod/                   # NodePort 8081, mensageria ligada, imagePullSecrets, sem Secret placeholder
 ├── scripts/
 │   ├── cluster-local.sh            # k3s dentro de um container Docker (up | down | status)
@@ -47,8 +47,8 @@ Este repositório só acrescenta ao cluster o que é do orçamento.
 | Namespace `orcamento`, ConfigMap `orcamento-config` | `k8s/base/` |
 | Deployment/Service/HPA `orcamento-api` | `k8s/base/api-*.yaml` |
 | SQL Server (pod + PVC, só local) | `k8s/overlays/local/sqlserver-*.yaml` |
-| LocalStack (pod, só local) | `k8s/overlays/local/localstack-*.yaml` |
-| Mensageria ligada, endpoints do LocalStack | patch do ConfigMap em `overlays/local/kustomization.yaml` |
+| RabbitMQ (pod, só local) | `k8s/overlays/local/rabbitmq-*.yaml` |
+| Mensageria ligada, host do RabbitMQ local | patch do ConfigMap em `overlays/local/kustomization.yaml` |
 | NodePort, ECR, `imagePullSecrets` | patches em `overlays/prod/kustomization.yaml` |
 
 ## Rodando localmente
@@ -77,10 +77,10 @@ scripts/deploy-local.sh              # ou: scripts/deploy-local.sh /caminho/do/O
 O `deploy-local.sh`:
 
 1. constrói `orcamento-api:latest` a partir do Dockerfile do serviço;
-2. importa essa imagem no containerd do k3s, junto com SQL Server, LocalStack e busybox se já
+2. importa essa imagem no containerd do k3s, junto com SQL Server, RabbitMQ e busybox se já
    existirem no Docker do host (o cluster não enxerga as imagens do host);
 3. cria o Secret `orcamento-secrets` a partir do `.env`;
-4. aplica `k8s/overlays/local` e espera os três Deployments ficarem prontos.
+4. aplica `k8s/overlays/local` e espera os três Deployments (API, SQL Server e RabbitMQ) ficarem prontos.
 
 Acessando a API:
 
@@ -89,14 +89,14 @@ kubectl port-forward -n orcamento svc/orcamento-api 8082:8080
 curl http://localhost:8082/health
 ```
 
-A porta 8082 não conflita com o compose do serviço, que usa a 8081.
+A porta 8082 não conflita com o compose do serviço, que usa a 8083.
 
 Acompanhando:
 
 ```bash
 kubectl get pods,svc,hpa -n orcamento
 kubectl logs -n orcamento deploy/orcamento-api -f
-kubectl exec -n orcamento deploy/orcamento-localstack -- awslocal sqs list-queues
+kubectl exec -n orcamento deploy/orcamento-rabbitmq -- rabbitmqctl list_queues name consumers messages
 ```
 
 Removendo:
@@ -119,11 +119,14 @@ orcamento-api:latest`, em vez de usar o `deploy-local.sh`.
   removem esse placeholder: no local, o Secret vem do `.env` pelo `deploy-local.sh`; em
   produção, virá do SSM Parameter Store pela pipeline.
 - **HPA com até 3 réplicas.** É seguro para este serviço: as migrations do EF Core 9 usam lock
-  (`sp_getapplock`), então só uma réplica migra por vez; não há seed; e o consumidor SQS usa
-  visibility timeout.
-- **Script do LocalStack duplicado.** `overlays/local/localstack/01-criar-topico-e-fila.sh` é
-  uma cópia do `scripts/localstack/` do serviço, porque o kustomize não lê arquivos fora da
-  pasta do overlay. Se a topologia mudar, atualize os dois.
+  (`sp_getapplock`), então só uma réplica migra por vez; não há seed; e as réplicas dividem as filas
+  `billing-*` do RabbitMQ como consumidores concorrentes, com idempotência por
+  `correlationId`.
+- **RabbitMQ em vez de SNS/SQS.** O serviço participa da Saga do ordemservico-service
+  (ADR-004 do serviço). As filas e exchanges são criadas pelo próprio MassTransit na
+  subida; não há script de topologia. Em produção, usuário e senha vêm do SSM
+  `/mechanicltda/prod/mensageria/rabbitmq-user|rabbitmq-segredo`, criados pelo
+  InfraKubernete do monólito; sem eles, o deploy sobe com `Mensageria__Habilitada=false`.
 - **Banco no pod sem o script do InfraSGBD.** No overlay local, quem cria o banco é o EF Core,
   na primeira migration. O `READ_COMMITTED_SNAPSHOT` que o InfraSGBD liga no compose não é
   aplicado aqui.
@@ -137,7 +140,7 @@ Cada stack lê o anterior via `terraform_remote_state`, então a ordem importa:
 | # | Repositório | O que faz |
 |---|---|---|
 | 1 | [InfraKubernete](https://github.com/Fiap-Mecanic-Ltda/InfraKubernete) | Cluster, ALB, roles; libera a 8081 no SG dos nós e põe os repos do orçamento no trust do OIDC |
-| 2 | **este** (`terraform.yml`) | ECR, SNS/SQS, regra do ALB, policies, SSM |
+| 2 | **este** (`terraform.yml`) | ECR, regra do ALB, policies, SSM |
 | 3 | [OrcamentoPagamento-InfraSGBD](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-InfraSGBD) | RDS + `db-connection-string` no SSM |
 | 4 | [OrcamentoPagamento-service](https://github.com/Fiap-Mecanic-Ltda/OrcamentoPagamento-service) | Push na `main` publica a imagem e dispara o `deploy.yml` daqui |
 
@@ -156,16 +159,13 @@ terraform apply
 | Recurso | Nome |
 |---|---|
 | ECR | `mechanicltda-orcamento` |
-| SNS (publicado pelo monólito) | `mechanicltda-prod-ordem-servico-eventos` |
-| SQS + DLQ (consumida pelo serviço) | `mechanicltda-prod-ordem-servico-itens-alterados` (+ `-dlq`, 5 tentativas) |
-| SNS (publicado pelo serviço) | `mechanicltda-prod-orcamento-eventos` |
 | Target group + regra no ALB interno | `/api/orcamento*`, `/api/pagamento*`, `/api/webhooks/mercadopago` → NodePort 8081 |
-| Policies inline | `mechanicltda-prod-ec2-role` e `-worker-role` (SNS/SQS/ECR), `-github-actions` (push no ECR) |
-| SSM `/mechanicltda/prod/orcamento/` | `topico-eventos-arn`, `fila-itens-alterados-url`, `mercadopago-*` (opcionais) |
-| SSM `/mechanicltda/prod/` | `ordem-servico-eventos-arn`, para o monólito publicar |
+| Policies inline | `mechanicltda-prod-ec2-role` e `-worker-role` (pull no ECR), `-github-actions` (push no ECR) |
+| SSM `/mechanicltda/prod/orcamento/` | `mercadopago-*` (opcionais) |
 
 O deploy monta o Secret `orcamento-secrets` com `db-connection-string` (do InfraSGBD),
-`jwt-secret-key` (o mesmo do monólito) e os parâmetros do Mercado Pago, se existirem. Sem o
+`jwt-secret-key` (o mesmo do monólito), as credenciais do RabbitMQ da `mensageria` e os
+parâmetros do Mercado Pago, se existirem. Sem o
 access token no SSM, o serviço sobe com `Pagamentos__Habilitado=false` (gateway fake).
 
 ### Secrets do GitHub (este repositório)
