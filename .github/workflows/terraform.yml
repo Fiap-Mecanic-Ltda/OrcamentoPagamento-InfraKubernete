@@ -5,16 +5,16 @@ name: Terraform - Infra do Orcamento no cluster
 # GitHub Actions e os parametros no SSM. Le o state do InfraKubernete do
 # monolito via terraform_remote_state - aquele stack precisa estar aplicado antes.
 #
-# - homolog: plan a cada mudanca em infra/.
+# - homologacao: plan a cada mudanca em infra/.
 # - main: plan e apply, com aprovacao do Environment "production".
 on:
   push:
-    branches: [main, homolog]
+    branches: [main, homologacao]
     paths:
       - "infra/**"
       - ".github/workflows/terraform.yml"
   pull_request:
-    branches: [main, homolog]
+    branches: [main, homologacao]
     paths:
       - "infra/**"
       - ".github/workflows/terraform.yml"
